@@ -34,7 +34,9 @@ permit_device_control() {
 }
 
 ensure_loopback() {
-  [ -b /dev/loop$1 ] || mknod -m 0660 /dev/loop$1 b 7 $1
+  exist=$(lsblk | grep loop$1 | wc -l)
+  [ "$exist" != "0" ] || mknod -m 0660 /dev/loop$1 b 7 $1
+ # [ -b /dev/loop$1 ] || mknod -m 0660 /dev/loop$1 b 7 $1
 }
 
 make_and_setup() {
@@ -56,9 +58,9 @@ setup_graph() {
   dd if=/dev/zero of=${image} bs=1 count=0 seek=100G
   mkfs.ext4 -F ${image}
 
-  i=0
+  i=2
   until make_and_setup $i $image >/tmp/setup_loopback.log 2>&1; do
-    if grep 'No such file or directory' /tmp/setup_loopback.log; then
+    if grep 'Could not find any loop device' /tmp/setup_loopback.log; then
       i=$(expr $i + 1)
     else
       echo "failed to setup loopback device:"
