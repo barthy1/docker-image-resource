@@ -1,7 +1,8 @@
 #!/bin/sh
 
 set -eu
-apt-get install -y dh-autoreconf
+#apt-get update
+#apt-get install -y libcurl4-openssl-dev
 cd /tmp
 git clone https://github.com/stedolan/jq.git
 cd jq

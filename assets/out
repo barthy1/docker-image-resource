@@ -85,7 +85,6 @@ pull_repository=$(jq -r '.params.pull_repository // ""' < $payload)
 pull_tag=$(jq -r '.params.pull_tag // "latest"' < $payload)
 
 rootfs="$(jq -r '.params.rootfs' < $payload)"
-
 if [ -n "$load_base" ]; then
   docker load -i "${load_base}/image"
   docker tag \
@@ -137,19 +136,16 @@ fi
 # so just parse it out
 
 # careful to not let 'tee' mask exit status
-
 {
   if ! docker push "${repository}:${tag_name}"; then
     touch /tmp/push-failed
   fi
 } | tee push-output
-
 if [ -e /tmp/push-failed ]; then
   exit 1
 fi
 
 digest="$(tail -1 push-output | awk '{print $3}')"
-
 if [ "$need_tag_as_latest" = "true" ] && [ "${tag_name}" != "latest"  ]    ; then
   docker tag "${repository}:${tag_name}" "${repository}:latest"
   docker push "${repository}:latest"
