@@ -1,90 +1,3 @@
-permit_device_control() {
-  local devices_mount_info=$(cat /proc/self/cgroup | grep devices)
-
-  if [ -z "$devices_mount_info" ]; then
-    # cgroups not set up; must not be in a container
-    return
-  fi
-
-  local devices_subsytems=$(echo $devices_mount_info | cut -d: -f2)
-  local devices_subdir=$(echo $devices_mount_info | cut -d: -f3)
-
-  if [ "$devices_subdir" = "/" ]; then
-    # we're in the root devices cgroup; must not be in a container
-    return
-  fi
-
-  cgroup_dir=/tmp/devices-cgroup
-
-  if [ ! -e ${cgroup_dir} ]; then
-    # mount our container's devices subsystem somewhere
-    mkdir ${cgroup_dir}
-  fi
-
-  if ! mountpoint -q ${cgroup_dir}; then
-    if ! mount -t cgroup -o $devices_subsytems none ${cgroup_dir}; then
-      return 1
-    fi
-  fi
-
-  # permit our cgroup to do everything with all devices
-  # ignore failure in case something has already done this; echo appears to
-  # return EINVAL, possibly because devices this affects are already in use
-  echo a > ${cgroup_dir}${devices_subdir}/devices.allow || true
-}
-
-ensure_loopback() {
-  exist=$(lsblk | grep loop$1 | wc -l)
-  [ "$exist" != "0" ] || mknod -m 0660 /dev/loop$1 b 7 $1
- # [ -b /dev/loop$1 ] || mknod -m 0660 /dev/loop$1 b 7 $1
-}
-
-make_and_setup() {
-  ensure_loopback $1
-  losetup -f $2
-}
-
-setup_graph() {
-  set -x
-
-  if ! permit_device_control; then
-    echo "could not permit loopback device usage"
-    return 1
-  fi
-
-  mkdir -p /var/lib/docker
-
-  image=$(mktemp /tmp/docker.img.XXXXXXXX)
-  dd if=/dev/zero of=${image} bs=1 count=0 seek=100G
-  mkfs.ext4 -F ${image}
-
-  i=2
-  until make_and_setup $i $image >/tmp/setup_loopback.log 2>&1; do
-    if grep 'Could not find any loop device' /tmp/setup_loopback.log; then
-      i=$(expr $i + 1)
-    else
-      echo "failed to setup loopback device:"
-      cat /tmp/setup_loopback.log
-      return 1
-    fi
-  done
-
-  # ensure extra loopbacks are available for devmapper driver
-  for extra in $(seq 10); do
-    ensure_loopback $(expr $i + $extra)
-  done
-
-  lo=$(losetup -a | grep ${image} | cut -d: -f1)
-  if [ -z "$lo" ]; then
-    echo "could not locate loopback device"
-    return 1
-  fi
-
-  mount ${lo} /var/lib/docker
-
-  set +x
-}
-
 sanitize_cgroups() {
   mkdir -p /sys/fs/cgroup
   mountpoint -q /sys/fs/cgroup || \
@@ -92,8 +5,18 @@ sanitize_cgroups() {
 
   mount -o remount,rw /sys/fs/cgroup
 
-  for sys in `sed -e '1d;s/\([^\t]\)\t.*$/\1/' /proc/cgroups`; do
-    grouping=$(cat /proc/self/cgroup | cut -d: -f2 | grep "\\<$sys\\>")
+  sed -e 1d /proc/cgroups | while read sys hierarchy num enabled; do
+    if [ "$enabled" != "1" ]; then
+      # subsystem disabled; skip
+      continue
+    fi
+
+    grouping="$(cat /proc/self/cgroup | cut -d: -f2 | grep "\\<$sys\\>")"
+    if [ -z "$grouping" ]; then
+      # subsystem not mounted anywhere; mount it on its own
+      grouping="$sys"
+    fi
+
     mountpoint="/sys/fs/cgroup/$grouping"
 
     mkdir -p "$mountpoint"
@@ -121,22 +44,21 @@ start_docker() {
 
   sanitize_cgroups
 
-  if ! setup_graph >/tmp/setup_graph.log 2>&1; then
-    echo "failed to set up graph:"
-    cat /tmp/setup_graph.log
-    exit 1
-  fi
-
   # check for /proc/sys being mounted readonly, as systemd does
   if grep '/proc/sys\s\+\w\+\s\+ro,' /proc/mounts >/dev/null; then
     mount -o remount,rw /proc/sys
   fi
 
   local server_args=""
+  local registry=""
 
   for registry in $1; do
     server_args="${server_args} --insecure-registry ${registry}"
   done
+
+  if [ -n "$2" ]; then
+    server_args="${server_args} --registry-mirror=$2"
+  fi
 
   docker daemon ${server_args} >/tmp/docker.log 2>&1 &
   echo $! > /tmp/docker.pid
@@ -159,8 +81,6 @@ stop_docker() {
 
   kill -TERM $pid
   wait $pid
-
-  umount /var/lib/docker
 }
 
 private_registry() {
@@ -194,6 +114,18 @@ image_from_tag() {
 
 image_from_digest() {
   docker images --no-trunc --digests "$1" | awk "{if (\$3 == \"$2\") print \$4}"
+}
+
+certs_to_file() {
+  local raw_ca_certs="${1}"
+  local cert_count="$(echo $raw_ca_certs | jq -r '. | length')"
+
+  for i in $(seq 0 $(expr "$cert_count" - 1));
+  do
+    local cert_dir="/etc/docker/certs.d/$(echo $raw_ca_certs | jq -r .[$i].domain)"
+    mkdir -p "$cert_dir"
+    echo $raw_ca_certs | jq -r .[$i].cert >> "${cert_dir}/ca.crt"
+  done
 }
 
 docker_pull() {

@@ -24,13 +24,13 @@ cat > $payload <&0
 
 insecure_registries=$(jq -r '.source.insecure_registries // [] | join(" ")' < $payload)
 
-start_docker "$insecure_registries"
+registry_mirror=$(jq -r '.source.registry_mirror // ""' < $payload)
 
 username=$(jq -r '.source.username // ""' < $payload)
 password=$(jq -r '.source.password // ""' < $payload)
-email=$(jq -r '.source.email // ""' < $payload)
 repository="$(jq -r '.source.repository // ""' < $payload)"
 tag="$(jq -r '.source.tag // "latest"' < $payload)"
+ca_certs=$(jq -r '.source.ca_certs // []' < $payload)
 
 if private_registry "${repository}" ; then
   registry="$(extract_registry "${repository}")"
@@ -44,13 +44,16 @@ rootfs="$(jq -r '.params.rootfs // false' < $payload)"
 skip_download="$(jq -r '.params.skip_download // false' < $payload)"
 save="$(jq -r '.params.save // false' < $payload)"
 
+certs_to_file "$ca_certs"
+start_docker "$insecure_registries" "$registry_mirror"
+
 mkdir -p $destination
 
 image_name="${repository}@${digest}"
 
 if [ "$skip_download" = "false" ]; then
-  if [ -n "${username}" ] && [ -n "${password}" ] && [ -n "${email}" ]; then
-    docker login -u "${username}" -p "${password}" -e "${email}" ${registry}
+  if [ -n "${username}" ] && [ -n "${password}" ]; then
+    docker login -u "${username}" -p "${password}" ${registry}
   fi
 
   docker_pull "$image_name"

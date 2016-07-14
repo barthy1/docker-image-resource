@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -28,6 +29,12 @@ func main() {
 
 	registryHost, repo := parseRepository(request.Source.Repository)
 
+	if len(request.Source.RegistryMirror) > 0 {
+		registryMirrorUrl, err := url.Parse(request.Source.RegistryMirror)
+		fatalIf("failed to parse registry mirror URL", err)
+		registryHost = registryMirrorUrl.Host
+	}
+
 	tag := request.Source.Tag
 	if tag == "" {
 		tag = "latest"
@@ -44,7 +51,11 @@ func main() {
 	manifestURL, err := ub.BuildManifestURL(repo, tag)
 	fatalIf("failed to build manifest URL", err)
 
-	manifestResponse, err := client.Get(manifestURL)
+	manifestRequest, err := http.NewRequest("GET", manifestURL, nil)
+	fatalIf("failed to build manifest request", err)
+	manifestRequest.Header.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+	manifestRequest.Header.Add("Accept", "application/json")
+	manifestResponse, err := client.Do(manifestRequest)
 	fatalIf("failed to fetch manifest", err)
 
 	manifestResponse.Body.Close()
@@ -58,15 +69,24 @@ func main() {
 		fatal("no digest returned")
 	}
 
-	response := CheckResponse{}
-	if digest != request.Version.Digest {
-		response = append(response, Version{digest})
-	}
+	response := CheckResponse{Version{digest}}
 
 	json.NewEncoder(os.Stdout).Encode(response)
 }
 
 func makeTransport(request CheckRequest, registryHost string, repository string) (http.RoundTripper, string) {
+	// for non self-signed registries, caCertPool must be nil in order to use the system certs
+	var caCertPool *x509.CertPool
+	if len(request.Source.DomainCerts) > 0 {
+		caCertPool = x509.NewCertPool()
+		for _, domainCert := range request.Source.DomainCerts {
+			ok := caCertPool.AppendCertsFromPEM([]byte(domainCert.Cert))
+			if !ok {
+				fatal(fmt.Sprintf("failed to parse CA certificate for \"%s\"", domainCert.Domain))
+			}
+		}
+	}
+
 	baseTransport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		Dial: (&net.Dialer{
@@ -75,6 +95,7 @@ func makeTransport(request CheckRequest, registryHost string, repository string)
 			DualStack: true,
 		}).Dial,
 		DisableKeepAlives: true,
+		TLSClientConfig:   &tls.Config{RootCAs: caCertPool},
 	}
 
 	var insecure bool
@@ -94,7 +115,6 @@ func makeTransport(request CheckRequest, registryHost string, repository string)
 
 	pingClient := pester.New()
 	pingClient.Transport = authTransport
-	pingClient.Timeout = 5 * time.Second
 
 	challengeManager := auth.NewSimpleChallengeManager()
 
@@ -165,7 +185,7 @@ func parseRepository(repository string) (string, string) {
 	case 3:
 		return segs[0], segs[1] + "/" + segs[2]
 	case 2:
-		if strings.Contains(segs[0], ":") {
+		if strings.Contains(segs[0], ":") || strings.Contains(segs[0], ".") {
 			return segs[0], segs[1]
 		} else {
 			return officialRegistry, segs[0] + "/" + segs[1]

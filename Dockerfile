@@ -4,9 +4,10 @@ RUN rm -rf /var/lib/apt/lists/* && apt-get update
 RUN apt-get install -y iptables
 RUN apt-get install -y openssl ssl-cert
 
-RUN for cert in `ls -1 /etc/ssl/certs/*.pem`; \
-      do cat "$cert" >> /etc/ssl/certs/ca-certificates.crt; \
-    done
+RUN cat /etc/ssl/certs/*.pem > /etc/ssl/certs/ca-certificates.crt
+#RUN for cert in `ls -1 /etc/ssl/certs/*.pem`; \
+#      do cat "$cert" >> /etc/ssl/certs/ca-certificates.crt; \
+#    done
 
 ADD scripts/install_jq.sh install_jq.sh
 RUN ./install_jq.sh && rm install_jq.sh
