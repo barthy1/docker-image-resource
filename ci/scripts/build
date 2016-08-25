@@ -9,15 +9,34 @@ export PATH=$PWD/gopath/bin:$PATH
 
 cd $(dirname $0)/../..
 
+#go get ./... | true
+
 go install github.com/concourse/docker-image-resource/vendor/github.com/onsi/ginkgo/ginkgo
 
-CGO_ENABLED=1 ginkgo -race -r -p
+cd $GOPATH/src/github.com/concourse/docker-image-resource
+if [ "`uname -m`" == "ppc64le" ]; then
+  race=""
+else
+  race="-race"
+fi
+CGO_ENABLED=1 ginkgo $race -r -p
 
 go build -o ./assets/check ./cmd/check/
 go build -o ./assets/print-metadata ./cmd/print-metadata/
 
+if [ "`uname -m`" == "ppc64le" ]; then
+mkdir docker
+wget https://master.dockerproject.org/linux/ppc64le/dockerd \
+          https://master.dockerproject.org/linux/ppc64le/docker-proxy \
+          https://master.dockerproject.org/linux/ppc64le/docker-runc \
+          https://master.dockerproject.org/linux/ppc64le/docker \
+          https://master.dockerproject.org/linux/ppc64le/docker-containerd \
+          https://master.dockerproject.org/linux/ppc64le/docker-containerd-shim -P ./docker
+chmod +x ./docker/*
+else
 curl -sSL -O https://get.docker.com/builds/Linux/x86_64/docker-1.11.0.tgz
 tar zxf docker-1.11.0.tgz
+fi
 
 go build -o ./ecr-login github.com/concourse/docker-image-resource/vendor/github.com/awslabs/amazon-ecr-credential-helper/ecr-login/cmd
 
