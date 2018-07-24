@@ -64,6 +64,38 @@ var _ = Describe("Out", func() {
 		return "DOCKERD: " + cmd
 	}
 
+	It("retries starting dockerd if it fails", func() {
+		session := putWithEnv(map[string]interface{}{
+			"source": map[string]interface{}{
+				"repository": "test",
+			},
+			"params": map[string]interface{}{
+				"build": "/docker-image-resource/tests/fixtures/build",
+			},
+		}, map[string]string{
+			"STARTUP_TIMEOUT": "5",
+			"FAIL_ONCE": "true",
+		})
+
+		Expect(session.Err).To(gbytes.Say("(?s:DOCKERD.*DOCKERD.*)"))
+	})
+
+	It("times out retrying dockerd", func() {
+		session := putWithEnv(map[string]interface{}{
+			"source": map[string]interface{}{
+				"repository": "test",
+			},
+			"params": map[string]interface{}{
+				"build": "/docker-image-resource/tests/fixtures/build",
+			},
+		}, map[string]string{
+			"STARTUP_TIMEOUT": "1",
+			"FAIL_ONCE": "true",
+		})
+
+		Expect(session.Err).To(gbytes.Say(".*Docker failed to start.*"))
+	})
+
 	It("starts dockerd with --data-root under /scratch", func() {
 		session := put(map[string]interface{}{
 			"source": map[string]interface{}{
@@ -186,6 +218,77 @@ var _ = Describe("Out", func() {
 		})
 	})
 
+	Context("When passing tag ", func() {
+		It("should pull tag from file", func() {
+			session := put(map[string]interface{}{
+				"source": map[string]interface{}{
+					"repository": "test",
+				},
+				"params": map[string]interface{}{
+					"build": "/docker-image-resource/tests/fixtures/build",
+					"tag":   "/docker-image-resource/tests/fixtures/tag",
+				},
+			},
+			)
+			Expect(session.Err).To(gbytes.Say(docker(`push test:foo`)))
+		})
+	})
+
+	Context("When passing tag_file", func() {
+		It("should pull tag from file", func() {
+			session := put(map[string]interface{}{
+				"source": map[string]interface{}{
+					"repository": "test",
+				},
+				"params": map[string]interface{}{
+					"build":    "/docker-image-resource/tests/fixtures/build",
+					"tag_file": "/docker-image-resource/tests/fixtures/tag",
+				},
+			},
+			)
+			Expect(session.Err).To(gbytes.Say(docker(`push test:foo`)))
+		})
+	})
+
+	Context("When passing tag and tag_file", func() {
+		It("should pull tag from file (prefer tag_file param)", func() {
+			session := put(map[string]interface{}{
+				"source": map[string]interface{}{
+					"repository": "test",
+				},
+				"params": map[string]interface{}{
+					"build":    "/docker-image-resource/tests/fixtures/build",
+					"tag":      "/docker-image-resource/tests/fixtures/doesnotexist",
+					"tag_file": "/docker-image-resource/tests/fixtures/tag",
+				},
+			},
+			)
+			Expect(session.Err).To(gbytes.Say(docker(`push test:foo`)))
+		})
+	})
+
+	Context("When passing additional_tags ", func() {
+		It("should push add the additional_tags", func() {
+			session := put(map[string]interface{}{
+				"source": map[string]interface{}{
+					"repository": "test",
+				},
+				"params": map[string]interface{}{
+					"build":           "/docker-image-resource/tests/fixtures/build",
+					"additional_tags": "/docker-image-resource/tests/fixtures/tags",
+				},
+			},
+			)
+			Expect(session.Err).To(gbytes.Say(docker(`push test:latest`)))
+			Expect(session.Err).To(gbytes.Say(docker(`tag test:latest test:a`)))
+			Expect(session.Err).To(gbytes.Say(docker(`push test:a`)))
+			Expect(session.Err).To(gbytes.Say(docker(`tag test:latest test:b`)))
+			Expect(session.Err).To(gbytes.Say(docker(`push test:b`)))
+			Expect(session.Err).To(gbytes.Say(docker(`tag test:latest test:c`)))
+			Expect(session.Err).To(gbytes.Say(docker(`push test:c`)))
+		})
+	})
+
 	Context("When only http_proxy setting is provided, with no build arguments", func() {
 		It("passes the arguments correctly to the docker daemon", func() {
 			session := putWithEnv(map[string]interface{}{
@@ -251,6 +354,100 @@ var _ = Describe("Out", func() {
 
 			Expect(session.Err).NotTo(gbytes.Say(docker(`load -i unexpected_base/image`)))
 			Expect(session.Err).NotTo(gbytes.Say(docker(`tag some-image-id-3 some-repository-3:some-tag-3`)))
+		})
+	})
+
+	Context("when cache_from images are specified", func() {
+		BeforeEach(func() {
+			os.Mkdir("/tmp/cache_from_1", os.ModeDir)
+			// this image should really be an actual tarball, but the test passes with text. :shrug:
+			ioutil.WriteFile("/tmp/cache_from_1/image", []byte("some-image-1"), os.ModePerm)
+			ioutil.WriteFile("/tmp/cache_from_1/repository", []byte("some-repository-1"), os.ModePerm)
+			ioutil.WriteFile("/tmp/cache_from_1/image-id", []byte("some-image-id-1"), os.ModePerm)
+			ioutil.WriteFile("/tmp/cache_from_1/tag", []byte("some-tag-1"), os.ModePerm)
+
+			os.Mkdir("/tmp/cache_from_2", os.ModeDir)
+			ioutil.WriteFile("/tmp/cache_from_2/image", []byte("some-image-2"), os.ModePerm)
+			ioutil.WriteFile("/tmp/cache_from_2/repository", []byte("some-repository-2"), os.ModePerm)
+			ioutil.WriteFile("/tmp/cache_from_2/image-id", []byte("some-image-id-2"), os.ModePerm)
+			ioutil.WriteFile("/tmp/cache_from_2/tag", []byte("some-tag-2"), os.ModePerm)
+		})
+
+		AfterEach(func() {
+			os.RemoveAll("/tmp/cache_from_1")
+			os.RemoveAll("/tmp/cache_from_2")
+		})
+
+		It("calls docker load to load the cache_from images", func() {
+			session := put(map[string]interface{}{
+				"source": map[string]interface{}{
+					"repository": "test",
+				},
+				"params": map[string]interface{}{
+					"build":      "/docker-image-resource/tests/fixtures/build",
+					"cache_from": []string{"cache_from_1", "cache_from_2"},
+				},
+			})
+			Expect(session.Err).To(gbytes.Say(docker(`load -i cache_from_1/image`)))
+			Expect(session.Err).To(gbytes.Say(docker(`tag some-image-id-1 some-repository-1:some-tag-1`)))
+
+			Expect(session.Err).To(gbytes.Say(docker(`load -i cache_from_2/image`)))
+			Expect(session.Err).To(gbytes.Say(docker(`tag some-image-id-2 some-repository-2:some-tag-2`)))
+		})
+
+		It("loads both cache_from and load_bases images", func() {
+			session := put(map[string]interface{}{
+				"source": map[string]interface{}{
+					"repository": "test",
+				},
+				"params": map[string]interface{}{
+					"build":      "/docker-image-resource/tests/fixtures/build",
+					"load_bases": []string{"cache_from_1"},
+					"cache_from": []string{"cache_from_2"},
+				},
+			})
+			Expect(session.Err).To(gbytes.Say(docker(`load -i cache_from_1/image`)))
+			Expect(session.Err).To(gbytes.Say(docker(`tag some-image-id-1 some-repository-1:some-tag-1`)))
+
+			Expect(session.Err).To(gbytes.Say(docker(`load -i cache_from_2/image`)))
+			Expect(session.Err).To(gbytes.Say(docker(`tag some-image-id-2 some-repository-2:some-tag-2`)))
+		})
+
+		It("passes the arguments correctly to the docker build command", func() {
+			session := put(map[string]interface{}{
+				"source": map[string]interface{}{
+					"repository": "test",
+				},
+				"params": map[string]interface{}{
+					"build":      "/docker-image-resource/tests/fixtures/build",
+					"cache_from": []string{"cache_from_1", "cache_from_2"},
+				},
+			})
+
+			Expect(session.Err).To(gbytes.Say(dockerarg(`--cache-from`)))
+			Expect(session.Err).To(gbytes.Say(dockerarg(`some-repository-1:some-tag-1`)))
+			Expect(session.Err).To(gbytes.Say(dockerarg(`--cache-from`)))
+			Expect(session.Err).To(gbytes.Say(dockerarg(`some-repository-2:some-tag-2`)))
+		})
+
+		It("does not remove the arguments generated by cache:true", func() {
+			session := put(map[string]interface{}{
+				"source": map[string]interface{}{
+					"repository": "test",
+				},
+				"params": map[string]interface{}{
+					"build":      "/docker-image-resource/tests/fixtures/build",
+					"cache":      "true",
+					"cache_from": []string{"cache_from_1", "cache_from_2"},
+				},
+			})
+
+			Expect(session.Err).To(gbytes.Say(dockerarg(`--cache-from`)))
+			Expect(session.Err).To(gbytes.Say(dockerarg(`test:latest`)))
+			Expect(session.Err).To(gbytes.Say(dockerarg(`--cache-from`)))
+			Expect(session.Err).To(gbytes.Say(dockerarg(`some-repository-1:some-tag-1`)))
+			Expect(session.Err).To(gbytes.Say(dockerarg(`--cache-from`)))
+			Expect(session.Err).To(gbytes.Say(dockerarg(`some-repository-2:some-tag-2`)))
 		})
 	})
 })

@@ -1,5 +1,6 @@
 LOG_FILE=${LOG_FILE:-/tmp/docker.log}
 SKIP_PRIVILEGED=${SKIP_PRIVILEGED:-false}
+STARTUP_TIMEOUT=${STARTUP_TIMEOUT:-120}
 
 sanitize_cgroups() {
   mkdir -p /sys/fs/cgroup
@@ -14,7 +15,7 @@ sanitize_cgroups() {
       continue
     fi
 
-    grouping="$(cat /proc/self/cgroup | cut -d: -f2 | grep "\\<$sys\\>")"
+    grouping="$(cat /proc/self/cgroup | cut -d: -f2 | grep "\\<$sys\\>")" || true
     if [ -z "$grouping" ]; then
       # subsystem not mounted anywhere; mount it on its own
       grouping="$sys"
@@ -39,6 +40,11 @@ sanitize_cgroups() {
       ln -s "$mountpoint" "/sys/fs/cgroup/$sys"
     fi
   done
+
+  if ! test -e /sys/fs/cgroup/systemd ; then
+    mkdir /sys/fs/cgroup/systemd
+    mount -t cgroup -o none,name=systemd none /sys/fs/cgroup/systemd
+  fi
 }
 
 start_docker() {
@@ -68,17 +74,29 @@ start_docker() {
     server_args="${server_args} --registry-mirror $4"
   fi
 
-  dockerd --data-root /scratch/docker ${server_args} >$LOG_FILE 2>&1 &
-  echo $! > /tmp/docker.pid
+  try_start() {
+    dockerd --data-root /scratch/docker ${server_args} >$LOG_FILE 2>&1 &
+    echo $! > /tmp/docker.pid
 
+    sleep 1
+
+    echo waiting for docker to come up...
+    until docker info >/dev/null 2>&1; do
+      sleep 1
+      if ! kill -0 "$(cat /tmp/docker.pid)" 2>/dev/null; then
+        return 1
+      fi
+    done
+  }
+
+  export server_args LOG_FILE
+  declare -fx try_start
   trap stop_docker EXIT
 
-  sleep 1
-
-  until docker info >/dev/null 2>&1; do
-    echo waiting for docker to come up...
-    sleep 1
-  done
+  if ! timeout -t ${STARTUP_TIMEOUT} bash -ce 'while true; do try_start && break; done'; then
+    echo Docker failed to start within ${STARTUP_TIMEOUT} seconds.
+    return 1
+  fi
 }
 
 stop_docker() {
@@ -96,7 +114,7 @@ log_in() {
   local registry="$3"
 
   if [ -n "${username}" ] && [ -n "${password}" ]; then
-    docker login -u "${username}" -p "${password}" ${registry}
+    echo "${password}" | docker login -u "${username}" --password-stdin ${registry}
   else
     mkdir -p ~/.docker
     echo '{"credsStore":"ecr-login"}' >> ~/.docker/config.json
